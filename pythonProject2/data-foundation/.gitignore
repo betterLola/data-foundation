@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# 虚拟环境
+venv/
+venv*/
+env/
+.env
+ENV/
+
+# 敏感配置文件（请勿上传！）
+config.py
+
+# 日志文件
+logs/
+*.log
+
+# 下载缓存（爬虫临时文件）
+Downloads/
+*.xlsx
+*.xls
+*.crdownload
+
+# 数据文件（历史数据通常不上传）
+历史数据/
+*.csv
+
+# IDE
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# 测试输出
+debug/
+*.png
+*_debug.html
+page_source_debug.html
+
+# 报表产出（本地生成，不上传）
+报表产出/
+*.docx
+
+# Windows 系统文件
+desktop.ini
