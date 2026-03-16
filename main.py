@@ -7,6 +7,9 @@ import pymysql
 import traceback
 from datetime import datetime, timedelta
 
+# 回填模块（检查并补填近7天漏填数据）
+import data_backfilling
+
 # ── 尝试从统一配置文件加载（推荐方式） ─────────────────────────
 try:
     from config import DB_CONFIG, DINGTALK_WEBHOOK, DAU_DROP_THRESHOLD, DAU_MIN_VALID
@@ -41,6 +44,28 @@ logging.basicConfig(
     ]
 )
 log = logging.getLogger(__name__)
+
+def run_backfill():
+    """
+    调用 data_backfilling 模块，检查并回填近7天漏填数据。
+    覆盖范围：
+      - platform_daily_metrics: android/ios/harmony/app/mini/alipay DAU（友盟API）
+      - platform_daily_metrics: smart_frontend_dau（智能前端爬虫）
+      - platform_daily_metrics: new_register_users / new_realname_users（内网爬虫）
+      - resource_total: 各端事件数据（友盟API）
+      - 5100_detail: 510100_items 子服务明细（友盟API）
+    每个数据源独立容错，单项失败不影响其余项。
+    """
+    print("==================================================")
+    print("🔁 开始执行近7天数据回填检查")
+    print("==================================================")
+    try:
+        data_backfilling.main()
+        print("✅ 数据回填检查执行完成\n")
+    except Exception as e:
+        print(f"❌ 数据回填执行异常: {e}\n")
+        traceback.print_exc()
+
 
 def run_script(script_name):
     """
@@ -443,6 +468,11 @@ def main():
 
     # 全库去重逻辑
     deduplicate_all_tables()
+
+    # 近7天数据回填：修复因任务失败/网络异常导致的历史数据缺口
+    # 在当日采集和聚合完成后执行，确保补填数据与当日流程不冲突
+    print("\n--- 正在执行近7天数据回填检查 ---")
+    run_backfill()
 
     # ── 数据质量检查 ─────────────────────────────────────────
     quality_alerts = run_data_quality_check(target_date)
