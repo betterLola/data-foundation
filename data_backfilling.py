@@ -823,7 +823,7 @@ class InternalBackfillSpider:
     """
     内网爬虫回填版：一次会话抓取所有可见日期行数据，
     支持同时回填多天缺失数据。
-    关键：需滑动至表格底部，近7天数据才完整展示。
+    表格按日期降序排列（最新在最上方），无需滑动，直接逐行提取。
     """
 
     def __init__(self):
@@ -930,7 +930,11 @@ class InternalBackfillSpider:
     def extract_all_rows(self) -> dict:
         """
         提取表格所有可见行，返回 {date_str: (reg_val, real_val)}。
-        必须先滑动至表格底部，确保近7天数据行完整显示。
+        定位 is-scrolling-none 主表体，按列 class 名提取：
+          el-table_1_column_6  = 新增注册用户
+          el-table_1_column_14 = 新增实名用户
+        第1行=昨日，第2行=前天，依此类推；
+        优先读取日期列（el-table_1_column_2）校验，读取失败则按位置推算。
         """
         log.info('内网爬虫: 正在等待 iframe 加载...')
         time.sleep(10)
@@ -938,85 +942,57 @@ class InternalBackfillSpider:
         frame  = self.page.get_frame('tag:iframe', timeout=15)
         target = frame if frame else self.page
 
-        target.wait.ele_displayed('css:.el-table__header', timeout=20)
+        target.wait.ele_displayed('css:.el-table__body-wrapper', timeout=20)
         target.wait.ele_displayed('css:.el-table__row',    timeout=20)
 
-        # ── 滑动到表格底部 ──────────────────────────────────
-        log.info('内网爬虫: 滑动至表格底部，确保近7天数据完整展示...')
-        try:
-            table_wrapper = target.ele('css:.el-table__body-wrapper', timeout=10)
-            if table_wrapper:
-                # 通过 JS 将表格容器滚动到底部
-                target.run_js(
-                    'arguments[0].scrollTop = arguments[0].scrollHeight;',
-                    table_wrapper
-                )
-                time.sleep(2)
-        except Exception:
-            pass
-        # 同时将页面整体滚动到底部（兜底）
-        try:
-            target.scroll.to_bottom()
-            time.sleep(2)
-        except Exception:
-            pass
+        # 定位 is-scrolling-none 主表体（避免固定列重影）
+        tbody_wrapper = target.ele('css:.el-table__body-wrapper.is-scrolling-none', timeout=10)
+        if not tbody_wrapper:
+            tbody_wrapper = target
+            log.warning('内网爬虫: 未找到 is-scrolling-none，兜底使用整页')
 
-        # ── 动态识别列索引 ───────────────────────────────────
-        headers    = target.eles('xpath://thead//th//div[@class="cell"]')
-        date_index = 1
-        reg_index  = 8   # 兜底默认值
-        real_index = 9   # 兜底默认值
-
-        for i, h in enumerate(headers):
-            title = h.text.strip()
-            if any(k in title for k in ('日期', '时间', '统计日', '日')):
-                date_index = i + 1
-            elif '注册' in title:
-                reg_index  = i + 1
-            elif '实名' in title:
-                real_index = i + 1
-
-        log.info(
-            f'内网爬虫: 列索引 → 日期={date_index}, '
-            f'注册={reg_index}, 实名={real_index}'
-        )
-
-        # ── 遍历所有数据行 ───────────────────────────────────
-        rows   = target.eles('css:.el-table__row')
+        rows   = tbody_wrapper.eles('css:.el-table__row')
         result = {}
-        for row in rows:
+
+        for idx, row in enumerate(rows):
+            # 按位置推算该行对应日期（row 0 = 昨天）
+            inferred_date = (
+                datetime.date.today() - datetime.timedelta(days=idx + 1)
+            ).strftime('%Y-%m-%d')
+
+            # 尝试从日期列（column_2）读取并验证
+            row_date = inferred_date
             try:
-                date_text = row.ele(
-                    f'xpath:./td[{date_index}]//div[@class="cell"]'
-                ).text.strip()
-                reg_text  = row.ele(
-                    f'xpath:./td[{reg_index}]//div[@class="cell"]'
-                ).text.strip()
-                real_text = row.ele(
-                    f'xpath:./td[{real_index}]//div[@class="cell"]'
-                ).text.strip()
-
-                # 解析日期字符串 → YYYY-MM-DD
-                m = re.search(r'(\d{4}[-/]\d{1,2}[-/]\d{1,2})', date_text)
-                if m:
-                    date_str = m.group(1).replace('/', '-')
-                else:
-                    continue
-
-                reg_val  = (
-                    int(''.join(re.findall(r'\d+', reg_text.replace(',', ''))))
-                    if reg_text else 0
-                )
-                real_val = (
-                    int(''.join(re.findall(r'\d+', real_text.replace(',', ''))))
-                    if real_text else 0
-                )
-                result[date_str] = (reg_val, real_val)
-                log.info(
-                    f'  内网爬虫: {date_str} 注册={reg_val}, 实名={real_val}'
-                )
+                date_cell = row.ele('css:.el-table_1_column_2 .cell', timeout=2)
+                if date_cell:
+                    date_text = date_cell.text.strip()
+                    m = re.search(r'(\d{4}[-/]\d{1,2}[-/]\d{1,2})', date_text)
+                    if m:
+                        row_date = m.group(1).replace('/', '-')
+                        if row_date != inferred_date:
+                            log.info(
+                                f'  第{idx+1}行: 日期列={row_date}，位置推算={inferred_date}，'
+                                f'以日期列为准'
+                            )
             except Exception:
-                pass
+                log.info(f'  第{idx+1}行: 未能读取日期列，按位置推算={row_date}')
+
+            # 提取新增注册（column_6）和新增实名（column_14）
+            try:
+                reg_cell  = row.ele('css:.el-table_1_column_6 .cell', timeout=2)
+                real_cell = row.ele('css:.el-table_1_column_14 .cell', timeout=2)
+                reg_text  = reg_cell.text.strip()  if reg_cell  else '0'
+                real_text = real_cell.text.strip() if real_cell else '0'
+
+                reg_val  = int(re.sub(r'[^\d]', '', reg_text))  if reg_text  else 0
+                real_val = int(re.sub(r'[^\d]', '', real_text)) if real_text else 0
+
+                result[row_date] = (reg_val, real_val)
+                log.info(
+                    f'  内网爬虫: {row_date} 注册={reg_val}, 实名={real_val}'
+                )
+            except Exception as e:
+                log.warning(f'  第{idx+1}行({row_date}) 数据提取失败: {e}')
 
         log.info(f'内网爬虫: 共提取 {len(result)} 行数据')
         return result

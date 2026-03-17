@@ -45,27 +45,6 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-def run_backfill():
-    """
-    调用 data_backfilling 模块，检查并回填近7天漏填数据。
-    覆盖范围：
-      - platform_daily_metrics: android/ios/harmony/app/mini/alipay DAU（友盟API）
-      - platform_daily_metrics: smart_frontend_dau（智能前端爬虫）
-      - platform_daily_metrics: new_register_users / new_realname_users（内网爬虫）
-      - resource_total: 各端事件数据（友盟API）
-      - 5100_detail: 510100_items 子服务明细（友盟API）
-    每个数据源独立容错，单项失败不影响其余项。
-    """
-    print("==================================================")
-    print("🔁 开始执行近7天数据回填检查")
-    print("==================================================")
-    try:
-        data_backfilling.main()
-        print("✅ 数据回填检查执行完成\n")
-    except Exception as e:
-        print(f"❌ 数据回填执行异常: {e}\n")
-        traceback.print_exc()
-
 
 def run_script(script_name):
     """
@@ -101,6 +80,28 @@ def run_script(script_name):
         print(f"❌ {script_name} 发生未知错误: {e}\n")
         return False
 
+def run_backfill():
+    """
+    调用 data_backfilling 模块，检查并回填近7天漏填数据。
+    覆盖范围：
+      - platform_daily_metrics: android/ios/harmony/app/mini/alipay DAU（友盟API）
+      - platform_daily_metrics: smart_frontend_dau（智能前端爬虫）
+      - platform_daily_metrics: new_register_users / new_realname_users（内网爬虫）
+      - resource_total: 各端事件数据（友盟API）
+      - 5100_detail: 510100_items 子服务明细（友盟API）
+    每个数据源独立容错，单项失败不影响其余项。
+    """
+    print("==================================================")
+    print("🔁 开始执行近7天数据回填检查")
+    print("==================================================")
+    try:
+        data_backfilling.main()
+        print("✅ 数据回填检查执行完成\n")
+    except Exception as e:
+        print(f"❌ 数据回填执行异常: {e}\n")
+        traceback.print_exc()
+
+
 def update_total_service_times(target_date_str):
     """
     计算并更新昨日的累计服务总次数 (total_service_times)
@@ -119,7 +120,7 @@ def update_total_service_times(target_date_str):
         previous_date = target_date - timedelta(days=1)
         
         # 1. 获取昨天 (target_date) 5100_detail 中的所有服务次数总和
-        cursor.execute("SELECT SUM(service_amount) FROM 5100_detail WHERE stat_date = %s", (target_date,))
+        cursor.execute("SELECT SUM(service_amount) FROM `5100_detail` WHERE stat_date = %s", (target_date,))
         yesterday_sum_result = cursor.fetchone()
         yesterday_service_amount_sum = int(yesterday_sum_result[0]) if yesterday_sum_result and yesterday_sum_result[0] is not None else 0
         
@@ -420,60 +421,108 @@ def run_data_quality_check(target_date_str: str) -> list:
     return alerts
 
 
+
 def main():
     # 获取昨天的日期字符串作为目标日期
     target_date = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-    log.info(f"🌟 统一数据采集主流程启动")
+    log.info(f"🌟 统一数据采集主流程启动 🌟")
     log.info(f"📅 执行时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     log.info(f"📅 数据目标日期：{target_date}")
     print(f"🌟 统一数据采集主流程启动 🌟")
     print(f"📅 执行时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"📅 数据目标日期：{target_date}")
-
+    
     # 待执行的脚本列表（按逻辑依赖顺序排列）
-    scripts_to_run = [
-        "UmengAPI.py",                  # 友盟核心日活数据 (android_dau, ios_dau, harmonyos_dau, app_dau 等)
-        "5100_detail.py",               # 成都所有事项 510100_items 细分服务次数
-        "internal_network_spider.py",   # 内网数据 (new_register_users, new_realname_users)
-        "smart_frontend_dau_spider.py", # 智能前端平台日活爬虫
-        "fetch_retention.py",           # 留存率数据获取
-        "resource_total.py",            # 资源大盘总计数据 (昨日快照)
-    ]
-
+    script_mapping = {
+        'umeng_dau': "langchain.py",
+        '5100_detail': "5100_detail.py",
+        'internal_network': "internal_network_spider.py",
+        'smart_frontend': "smart_frontend_dau_spider.py",
+        'resource_total': "resource_total.py"
+    }
+    
     all_success = True
     failed_scripts = []
+    
+    print("\n--- 【Step 1】提前执行近7天数据缺失检查 ---")
+    missing_data = data_backfilling.get_missing_dates()
+    
+    # 需要重新计算汇总数据的最早日期
+    earliest_recalc_date = target_date
+    
+    for source, dates in missing_data.items():
+        if not dates:
+            continue
+            
+        print(f"🔍 发现 {source} 缺失数据: {dates}")
+        # 更新最早的回填日期，用于后续的连锁加总计算
+        min_date = min(dates)
+        if min_date < earliest_recalc_date:
+            earliest_recalc_date = min_date
+            
+        # 只要 dates 不为空，我们就认为 Step 1 会处理这个 source (无论是通过回填还是交给 Step 2)
+        # 如果包含昨天且只有昨天，我们跳过回填调用，让它留在 script_mapping 里由 Step 2 执行
+        if len(dates) == 1 and target_date in dates:
+            print(f"ℹ️ {source} 仅昨日数据缺失，将由常规采集任务处理。")
+            continue
+        
+        # 否则，启动回填程序（回填程序通常会处理传入的所有日期，包括昨天）
+        print(f"🚀 启动 {source} 回填程序...")
+        try:
+            if source == 'umeng_dau':
+                data_backfilling.backfill_umeng_dau(dates)
+            elif source == '5100_detail':
+                data_backfilling.backfill_5100_detail(dates)
+            elif source == 'internal_network':
+                data_backfilling.backfill_internal_network(dates)
+            elif source == 'smart_frontend':
+                data_backfilling.backfill_smart_frontend_dau(dates)
+            elif source == 'resource_total':
+                data_backfilling.backfill_resource_total(dates)
+            
+            print(f"✅ {source} 回填完成。")
+            
+            # 关键修复：既然回填程序已经跑过了，无论 dates 里有没有昨天，
+            # 都应该从 script_mapping 中移除，防止 Step 2 再次执行。
+            removed = script_mapping.pop(source, None)
+            if removed:
+                print(f"🗑️ 已从今日任务中移除 {source} (已在回填中处理)。")
+                
+        except Exception as e:
+            print(f"❌ {source} 回填异常: {e}")
+            traceback.print_exc()
+            all_success = False
 
-    # 依次执行各采集模块
+    # 依次执行剩余的各采集模块
+    scripts_to_run = list(script_mapping.values()) + ["fetch_retention.py"]
+    print(f"\n--- 【Step 2】执行今日常规采集任务 ---")
     for script in scripts_to_run:
         if not os.path.exists(script):
-            log.warning(f"找不到模块文件 {script}，跳过执行。")
             print(f"⚠️ 报错：找不到模块文件 {script}，跳过执行。")
             all_success = False
             failed_scripts.append(script)
             continue
-
+            
         success = run_script(script)
         if not success:
             all_success = False
             failed_scripts.append(script)
-            log.warning(f"{script} 运行遇到问题，已跳过。")
             print(f"⚠️ {script} 运行遇到问题，已跳过。")
+            
+    # 计算并更新累计服务总次数及汇总指标 (从最早回填日期到目标日期)
+    print("\n--- 【Step 3】正在执行最后的逻辑汇总 ---")
+    current_recalc_date = datetime.strptime(earliest_recalc_date, '%Y-%m-%d').date()
+    end_date = datetime.strptime(target_date, '%Y-%m-%d').date()
+    
+    while current_recalc_date <= end_date:
+        recalc_date_str = current_recalc_date.strftime('%Y-%m-%d')
+        update_total_service_times(recalc_date_str)
+        update_daily_aggregates(recalc_date_str)
+        current_recalc_date += timedelta(days=1)
 
-    # 计算并更新昨日累计服务总次数
-    print("\n--- 正在执行最后的逻辑汇总 ---")
-    update_total_service_times(target_date)
-
-    # 计算并更新 platform_dau, total_register_users, total_realname_users
-    update_daily_aggregates(target_date)
-
-    # 全库去重逻辑
+    # 【新增】全库去重逻辑
     deduplicate_all_tables()
-
-    # 近7天数据回填：修复因任务失败/网络异常导致的历史数据缺口
-    # 在当日采集和聚合完成后执行，确保补填数据与当日流程不冲突
-    print("\n--- 正在执行近7天数据回填检查 ---")
-    run_backfill()
-
+    
     # ── 数据质量检查 ─────────────────────────────────────────
     quality_alerts = run_data_quality_check(target_date)
 
@@ -483,7 +532,7 @@ def main():
         log.info(f"🎉 任务圆满完成！{target_date} 的所有字段数据已成功更新至 daily 数据库。")
         print(f"🎉 任务圆满完成！{target_date} 的所有字段数据已成功更新至 daily 数据库。")
     else:
-        msg = f"🛑 任务执行完毕，但以下模块存在异常：{', '.join(failed_scripts)}"
+        msg = f"🛑 任务执行完毕，但部分模块存在异常：{', '.join(failed_scripts)}"
         log.error(msg)
         print(msg)
         for fs in failed_scripts:
