@@ -126,17 +126,16 @@ def update_total_service_times(target_date_str):
         
         print(f"[{target_date_str}] 昨日本地 5100 服务总次数: {yesterday_service_amount_sum}")
         
-        # 2. 获取前天 (previous_date) platform_daily_metrics 的累计总次数
-        cursor.execute("SELECT total_service_times FROM platform_daily_metrics WHERE stat_date = %s", (previous_date,))
+        # 2. 获取前天或更早的 platform_daily_metrics 的累计总次数
+        cursor.execute("SELECT total_service_times, stat_date FROM platform_daily_metrics WHERE stat_date < %s AND total_service_times IS NOT NULL ORDER BY stat_date DESC LIMIT 1", (target_date,))
         previous_total_result = cursor.fetchone()
         
         if not previous_total_result:
-             print(f"⚠️ 警告: 数据库中找不到前天 ({previous_date}) 的累计记录，无法进行累加！")
-             print(f"ℹ️ 建议：请手动初始化前天或更早日期的 total_service_times 基础值。")
-             return
-             
-        previous_total_service_times = int(previous_total_result[0]) if previous_total_result[0] is not None else 0
-        print(f"[{previous_date}] 前天累计总次数: {previous_total_service_times}")
+             print(f"⚠️ 警告: 数据库中找不到 {target_date} 之前的累计记录！")
+             previous_total_service_times = 0
+        else:
+             previous_total_service_times = int(previous_total_result[0])
+             print(f"[{previous_total_result[1]}] 之前累计总次数: {previous_total_service_times}")
         
         # 3. 计算昨日新的累计总次数
         new_total_service_times = previous_total_service_times + yesterday_service_amount_sum
@@ -207,21 +206,23 @@ def update_daily_aggregates(target_date_str):
         )
         print(f"[{target_date_str}] 计算得出全平台总日活 (platform_dau): {platform_dau}")
 
-        # --- B. 获取前日累计数据 ---
+        # --- B. 获取前天或更早的累计数据 ---
         cursor.execute("""
-            SELECT total_register_users, total_realname_users 
+            SELECT total_register_users, total_realname_users, stat_date 
             FROM platform_daily_metrics 
-            WHERE stat_date = %s
-        """, (previous_date,))
+            WHERE stat_date < %s AND total_register_users IS NOT NULL
+            ORDER BY stat_date DESC LIMIT 1
+        """, (target_date,))
         prev_data = cursor.fetchone()
         
         if not prev_data:
-            print(f"⚠️ 警告: 找不到前天 ({previous_date}) 的记录，将仅使用昨日新增值作为初始累计。")
+            print(f"⚠️ 警告: 找不到 {target_date_str} 之前的记录！")
             prev_total_reg = 0
             prev_total_real = 0
         else:
-            prev_total_reg = prev_data.get('total_register_users') or 0
-            prev_total_real = prev_data.get('total_realname_users') or 0
+            prev_total_reg = int(prev_data.get('total_register_users') or 0)
+            prev_total_real = int(prev_data.get('total_realname_users') or 0)
+            print(f"[{prev_data.get('stat_date')}] 之前累计注册: {prev_total_reg}, 之前累计实名: {prev_total_real}")
 
         # 计算昨日新的累计值
         new_total_reg = prev_total_reg + (today_data.get('new_register_users') or 0)

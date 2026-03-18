@@ -977,10 +977,10 @@ class InternalBackfillSpider:
             except Exception:
                 log.info(f'  第{idx+1}行: 未能读取日期列，按位置推算={row_date}')
 
-            # 提取新增注册（column_6）和新增实名（column_14）
+            # 提取新增实名（column_6）和新增注册（column_14）
             try:
-                reg_cell  = row.ele('css:.el-table_1_column_6 .cell', timeout=2)
-                real_cell = row.ele('css:.el-table_1_column_14 .cell', timeout=2)
+                real_cell = row.ele('css:.el-table_1_column_6 .cell', timeout=2)
+                reg_cell  = row.ele('css:.el-table_1_column_14 .cell', timeout=2)
                 reg_text  = reg_cell.text.strip()  if reg_cell  else '0'
                 real_text = real_cell.text.strip() if real_cell else '0'
 

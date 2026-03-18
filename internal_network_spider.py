@@ -183,39 +183,39 @@ class InternalSpider:
         frame = self.page.get_frame('tag:iframe', timeout=15)
         target = frame if frame else self.page
         
-        # 等待数据行和表头出现
-        target.wait.ele_displayed('css:.el-table__header', timeout=20)
+        target.wait.ele_displayed('css:.el-table__body-wrapper', timeout=20)
         target.wait.ele_displayed('css:.el-table__row', timeout=20)
 
-        # 【核心修正】动态查找列索引
-        headers = target.eles('xpath://thead//th//div[@class="cell"]')
-        reg_index = -1
-        real_index = -1
-        
-        for i, h in enumerate(headers):
-            title = h.text.strip()
-            if '注册' in title:
-                reg_index = i + 1
-                log.info(f"找到【注册用户】列，索引为: {reg_index}")
-            elif '实名' in title:
-                real_index = i + 1
-                log.info(f"找到【实名用户】列，索引为: {real_index}")
+        # 定位 is-scrolling-none 区域，避免固定列重影行
+        tbody_wrapper = target.ele('css:.el-table__body-wrapper.is-scrolling-none', timeout=10)
+        if not tbody_wrapper:
+            tbody_wrapper = target
+            log.warning("未找到 is-scrolling-none，兜底使用整页")
 
-        # 如果没找到，兜底使用 8 和 9
-        if reg_index == -1: reg_index = 8
-        if real_index == -1: real_index = 9
+        # 第一行 = 昨日数据
+        row = tbody_wrapper.ele('css:.el-table__row', timeout=10)
+        if not row:
+            raise Exception("未找到数据行")
 
-        row = target.ele('css:.el-table__row', index=1)
-        if not row: raise Exception("未找到数据行")
+        # 按列 class 名提取：column_6=新增实名用户，column_14=新增注册用户
+        reg_text = ''
+        real_text = ''
+        try:
+            real_cell = row.ele('css:.el-table_1_column_6 .cell', timeout=3)
+            real_text = real_cell.text.strip() if real_cell else ''
+        except Exception as e:
+            log.warning(f"column_6 新增实名用户提取失败: {e}")
 
-        # 根据找到的索引提取
-        reg_text = row.ele(f'xpath:./td[{reg_index}]//div[@class="cell"]').text.strip()
-        real_text = row.ele(f'xpath:./td[{real_index}]//div[@class="cell"]').text.strip()
-        
+        try:
+            reg_cell = row.ele('css:.el-table_1_column_14 .cell', timeout=3)
+            reg_text = reg_cell.text.strip() if reg_cell else ''
+        except Exception as e:
+            log.warning(f"column_14 新增注册用户提取失败: {e}")
+
         log.info(f"提取结果 -> 注册: {reg_text}, 实名: {real_text}")
 
-        reg_val = int("".join(re.findall(r'\d+', reg_text.replace(',', '')))) if reg_text else 0
-        real_val = int("".join(re.findall(r'\d+', real_text.replace(',', '')))) if real_text else 0
+        reg_val = int(re.sub(r'[^\d]', '', reg_text)) if reg_text else 0
+        real_val = int(re.sub(r'[^\d]', '', real_text)) if real_text else 0
         return reg_val, real_val
 
     def save_to_db(self, reg_val, real_val):

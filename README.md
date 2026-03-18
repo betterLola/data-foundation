@@ -397,6 +397,24 @@ pip install pymysql DrissionPage pandas openpyxl
 
 ## 更新日志 (Changelog)
 
+### [2026-03-18] 跨项目同步与核心逻辑增强
+
+**同步与优化内容：**
+
+- **`internal_network_spider.py` (数据提取逻辑重构)**：
+  - 弃用动态列索引推算，改为锁定 `is-scrolling-none` 主表体容器。
+  - 固定使用 CSS 类名提取数据：`.el-table_1_column_6` (新增实名), `.el-table_1_column_14` (新增注册)。
+  - 极大提升了在固定列（Frozen Columns）场景下的抓取准确率。
+- **`data_backfilling.py` (回填模块同步更新)**：
+  - 同步修正了新增实名与新增注册的列映射规则，确保补数逻辑与主程序严格一致。
+- **`main.py` (历史累计逻辑鲁棒性增强)**：
+  - 优化了 `total_service_times`、`total_register_users` 和 `total_realname_users` 的滚动累加逻辑。
+  - 现支持自动向前追溯最近一条有效历史记录进行加总，不再受限于“前一日必须存在数据”的严格限制，提高了对间断性缺失数据的容错能力。
+- **安全性与脱敏**：
+  - 严格剥离账号、密码、Token 及内网 URL 等敏感信息至 `config.py`，确保代码仓库合规脱敏。
+
+**变更文件：** `internal_network_spider.py`, `data_backfilling.py`, `main.py`
+
 ### [2026-03-17]内网爬虫列定位重构（CSS class 名精准提取）
 
 **修复后已实现：数据回填与主流程增强**
