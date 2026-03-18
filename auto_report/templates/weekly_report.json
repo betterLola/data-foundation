@@ -1,0 +1,28 @@
+{
+  "_comment": "周报配置示例 — 对应 weekly_report_generator.py 的核心数据逻辑（简化版，不含图表）",
+  "report_name": "天府市民云周报",
+  "output_dir": "报表产出",
+  "output_filename": "周报_{date}.docx",
+  "variables": {
+    "cur_platform_avg": {
+      "type": "sql",
+      "query": "SELECT AVG(platform_dau) FROM platform_daily_metrics WHERE stat_date BETWEEN DATE_SUB(LAST_DAY(DATE_SUB(CURDATE(), INTERVAL 1 DAY)), INTERVAL 6 DAY) AND LAST_DAY(DATE_SUB(CURDATE(), INTERVAL 1 DAY))",
+      "format": "wan"
+    },
+    "cur_service_avg": {
+      "type": "sql",
+      "query": "SELECT AVG(daily_sum) FROM (SELECT DATE(stat_date) AS d, SUM(service_amount) AS daily_sum FROM `5100_detail` WHERE stat_date >= DATE_SUB(CURDATE(), INTERVAL 14 DAY) GROUP BY DATE(stat_date) ORDER BY d DESC LIMIT 7) t",
+      "format": "wan"
+    },
+    "top1_service": {
+      "type": "sql",
+      "query": "SELECT service_name FROM `5100_detail` WHERE DATE(stat_date) = '{yesterday}' GROUP BY service_name ORDER BY SUM(service_amount) DESC LIMIT 1",
+      "format": "raw"
+    },
+    "top1_service_amount": {
+      "type": "sql",
+      "query": "SELECT SUM(service_amount) FROM `5100_detail` WHERE DATE(stat_date) = '{yesterday}' GROUP BY service_name ORDER BY SUM(service_amount) DESC LIMIT 1",
+      "format": "int"
+    }
+  }
+}

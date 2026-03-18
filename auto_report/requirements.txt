@@ -1,0 +1,26 @@
+# 天府市民云数据采集与报告生成项目依赖
+# Python >= 3.11（推荐使用 venv311）
+
+# 数据库
+PyMySQL==1.1.2
+SQLAlchemy==2.0.48
+
+# Word 文档生成
+python-docx==1.2.0
+
+# 数据处理 & 可视化
+pandas==2.3.3
+matplotlib==3.10.8
+openpyxl==3.1.5
+
+# 浏览器自动化（智能前端 & 内网爬虫）
+DrissionPage==4.1.1.2
+
+# 智能问答（NL2SQL）
+streamlit==1.55.0
+langchain-community==0.4.1
+langchain-core==1.2.17
+langchain-google-genai==4.2.1
+
+# 环境变量管理
+python-dotenv==1.2.1
