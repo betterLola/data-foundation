@@ -64,6 +64,8 @@
           ▼                     ▼
   自动化日报生成           NL2SQL 智能问答
   (generate_daily_report)  (streamlit_sql2nlp)
+  
+  *自动化报告生成和NL2SQL 智能问答详情请见另两个仓库
 ```
 
 **数据写入职责分离，字段互不覆盖：**
