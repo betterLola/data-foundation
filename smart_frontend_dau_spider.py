@@ -448,7 +448,17 @@ def ensure_chrome_permissions() -> None:
             json.dump(prefs, f, ensure_ascii=False)
     except: pass
 
+def clear_chrome_lock():
+    """清理 Chrome 锁文件"""
+    lock_file = os.path.join(CHROME_PROFILE, 'SingletonLock')
+    if os.path.exists(lock_file):
+        try:
+            os.remove(lock_file)
+            log.info("已清理浏览器锁文件")
+        except: pass
+
 def kill_chrome_on_port(port: int) -> None:
+    """强制关闭占用指定调试端口的 Chrome 进程"""
     import subprocess
     try:
         res = subprocess.run(['netstat', '-ano'], capture_output=True, text=True)
@@ -457,10 +467,7 @@ def kill_chrome_on_port(port: int) -> None:
                 pid = line.strip().split()[-1]
                 if pid.isdigit():
                     subprocess.run(['taskkill', '/F', '/PID', pid], capture_output=True)
-    except: pass
-    try:
-        if os.path.exists(os.path.join(CHROME_PROFILE, 'Default', 'Session Storage', 'LOCK')):
-            subprocess.run(['taskkill', '/F', '/IM', 'chrome.exe', '/FI', 'WINDOWTITLE eq *'], capture_output=True)
+                    log.info(f"已强制关闭占用端口 {port} 的进程 PID: {pid}")
     except: pass
 
 def clean_download_dir() -> None:
@@ -476,6 +483,7 @@ def main() -> None:
     clean_download_dir()
     ensure_chrome_permissions()
     kill_chrome_on_port(CHROME_PORT)
+    clear_chrome_lock()
     
     start_run_time = time.time()
     page = create_page()
@@ -486,7 +494,8 @@ def main() -> None:
     finally:
         # 为了稳定，稍微多留 2 秒让写盘完成
         time.sleep(2)
-        page.quit()
+        try: page.quit()
+        except: pass
         log.info('浏览器已关闭')
 
     dau = parse_dau(file_path)
