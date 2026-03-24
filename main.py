@@ -435,7 +435,7 @@ def main():
     
     # 待执行的脚本列表（按逻辑依赖顺序排列）
     script_mapping = {
-        'umeng_dau': "langchain.py",
+        'umeng_dau': "UmengAPI.py",
         '5100_detail': "5100_detail.py",
         'internal_network': "internal_network_spider.py",
         'smart_frontend': "smart_frontend_dau_spider.py",

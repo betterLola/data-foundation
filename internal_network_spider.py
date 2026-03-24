@@ -75,6 +75,28 @@ def ensure_chrome_permissions():
         log.info("已成功预注入浏览器原生权限")
     except: pass
 
+def kill_chrome_on_port(port: int) -> None:
+    """强制关闭占用指定调试端口的 Chrome 进程"""
+    import subprocess
+    try:
+        res = subprocess.run(['netstat', '-ano'], capture_output=True, text=True)
+        for line in res.stdout.splitlines():
+            if f':{port} ' in line and 'LISTENING' in line:
+                pid = line.strip().split()[-1]
+                if pid.isdigit():
+                    subprocess.run(['taskkill', '/F', '/PID', pid], capture_output=True)
+                    log.info(f"已强制关闭占用端口 {port} 的进程 PID: {pid}")
+    except: pass
+
+def clear_chrome_lock():
+    """清理 Chrome 锁文件"""
+    lock_file = os.path.join(CHROME_PROFILE, 'SingletonLock')
+    if os.path.exists(lock_file):
+        try:
+            os.remove(lock_file)
+            log.info("已清理浏览器锁文件")
+        except: pass
+
 # ── 核心逻辑 ──────────────────────────────────────────────────
 
 class InternalSpider:
@@ -82,6 +104,10 @@ class InternalSpider:
         self.page = None
 
     def init_browser(self):
+        # 启动前清理旧进程
+        kill_chrome_on_port(CHROME_PORT)
+        clear_chrome_lock()
+
         co = ChromiumOptions()
         co.set_argument('--start-maximized')
         co.set_local_port(CHROME_PORT)
@@ -192,30 +218,49 @@ class InternalSpider:
             tbody_wrapper = target
             log.warning("未找到 is-scrolling-none，兜底使用整页")
 
-        # 第一行 = 昨日数据
-        row = tbody_wrapper.ele('css:.el-table__row', timeout=10)
-        if not row:
+        rows = tbody_wrapper.eles('css:.el-table__row')
+        if not rows:
             raise Exception("未找到数据行")
 
-        # 按列 class 名提取：column_6=新增实名用户，column_14=新增注册用户
-        reg_text = ''
-        real_text = ''
-        try:
-            real_cell = row.ele('css:.el-table_1_column_6 .cell', timeout=3)
-            real_text = real_cell.text.strip() if real_cell else ''
-        except Exception as e:
-            log.warning(f"column_6 新增实名用户提取失败: {e}")
+        reg_val = 0
+        real_val = 0
+        found = False
 
-        try:
-            reg_cell = row.ele('css:.el-table_1_column_14 .cell', timeout=3)
-            reg_text = reg_cell.text.strip() if reg_cell else ''
-        except Exception as e:
-            log.warning(f"column_14 新增注册用户提取失败: {e}")
+        log.info(f"开始寻找昨日 ({YESTERDAY}) 的数据行...")
+        for row in rows:
+            try:
+                # column_2 为日期列
+                date_cell = row.ele('css:.el-table_1_column_2 .cell', timeout=2)
+                if date_cell and YESTERDAY in date_cell.text:
+                    # column_14=新增注册用户，column_6=新增实名用户
+                    reg_cell = row.ele('css:.el-table_1_column_14 .cell', timeout=2)
+                    real_cell = row.ele('css:.el-table_1_column_6 .cell', timeout=2)
 
-        log.info(f"提取结果 -> 注册: {reg_text}, 实名: {real_text}")
+                    reg_text = reg_cell.text.strip() if reg_cell else '0'
+                    real_text = real_cell.text.strip() if real_cell else '0'
 
-        reg_val = int(re.sub(r'[^\d]', '', reg_text)) if reg_text else 0
-        real_val = int(re.sub(r'[^\d]', '', real_text)) if real_text else 0
+                    reg_val = int(re.sub(r'[^\d]', '', reg_text)) if reg_text else 0
+                    real_val = int(re.sub(r'[^\d]', '', real_text)) if real_text else 0
+
+                    log.info(f"找到昨日行 -> 注册: {reg_val}, 实名: {real_val}")
+                    found = True
+                    break
+            except Exception as e:
+                log.warning(f"行数据解析出错: {e}")
+
+        if not found:
+            log.warning(f"未在表格中找到日期 {YESTERDAY}，可能是系统延迟。尝试提取第一行作为替代...")
+            row = rows[0]
+            try:
+                reg_cell = row.ele('css:.el-table_1_column_14 .cell', timeout=2)
+                real_cell = row.ele('css:.el-table_1_column_6 .cell', timeout=2)
+                reg_text = reg_cell.text.strip() if reg_cell else '0'
+                real_text = real_cell.text.strip() if real_cell else '0'
+                reg_val = int(re.sub(r'[^\d]', '', reg_text)) if reg_text else 0
+                real_val = int(re.sub(r'[^\d]', '', real_text)) if real_text else 0
+            except Exception as e:
+                log.error(f"第一行兜底提取也失败了: {e}")
+
         return reg_val, real_val
 
     def save_to_db(self, reg_val, real_val):

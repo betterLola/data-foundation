@@ -123,6 +123,31 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+def _kill_chrome_on_port(port: int) -> None:
+    """强制关闭占用指定调试端口的 Chrome 进程"""
+    import subprocess
+    try:
+        # Windows 下使用 netstat 查找 PID 并 taskkill
+        res = subprocess.run(['netstat', '-ano'], capture_output=True, text=True)
+        for line in res.stdout.splitlines():
+            if f':{port} ' in line and 'LISTENING' in line:
+                pid = line.strip().split()[-1]
+                if pid.isdigit():
+                    subprocess.run(['taskkill', '/F', '/PID', pid], capture_output=True)
+                    log.info(f"已强制关闭占用端口 {port} 的进程 PID: {pid}")
+    except Exception:
+        pass
+
+def _clear_chrome_lock(profile_path: str):
+    """清理 Chrome 锁文件"""
+    lock_file = os.path.join(profile_path, 'SingletonLock')
+    if os.path.exists(lock_file):
+        try:
+            os.remove(lock_file)
+            log.info(f"已清理浏览器锁文件: {lock_file}")
+        except Exception:
+            pass
+
 # ════════════════════════════════════════════════════════════
 # Step 1 — 缺失检查
 # ════════════════════════════════════════════════════════════
@@ -135,7 +160,7 @@ def get_missing_dates() -> dict:
         {
           'umeng_dau':       [dates...],   # android/ios/harmony/mini/alipay 任一 NULL
           'smart_frontend':  [dates...],   # smart_frontend_dau 为 NULL
-          'internal_network':[dates...],   # new_register_users 或 new_realname_users 为 NULL
+          'internal_network':[dates...],   # new_register_users 或 new_realname_users 为 NULL 或 0
           'resource_total':  [dates...],   # resource_total 表该日期无记录
           '5100_detail':     [dates...],   # 5100_detail 表该日期无记录
         }
@@ -177,7 +202,8 @@ def get_missing_dates() -> dict:
                     missing['umeng_dau'].append(d)
                 if sf is None:
                     missing['smart_frontend'].append(d)
-                if reg is None or real is None:
+                # 如果 reg 或 real 为空，或为 0（排除正常的 0，但通常内网系统此时应有值），标记为缺失需重抓
+                if reg is None or real is None or reg == 0 or real == 0:
                     missing['internal_network'].append(d)
 
             # ── resource_total ──────────────────────────────────
@@ -483,6 +509,10 @@ def _clean_smart_download():
 
 
 def _create_smart_page():
+    # 启动前清理旧进程
+    _kill_chrome_on_port(SMART_PORT)
+    _clear_chrome_lock(SMART_PROFILE)
+
     from DrissionPage import ChromiumPage, ChromiumOptions
     for d in (SMART_DOWNLOAD_DIR, SMART_DEBUG_DIR, SMART_PROFILE):
         os.makedirs(d, exist_ok=True)
@@ -790,7 +820,9 @@ def backfill_smart_frontend_dau(dates: list):
     finally:
         time.sleep(2)
         page.quit()
-        log.info('智能前端浏览器已关闭')
+        _kill_chrome_on_port(SMART_PORT)
+        time.sleep(8)
+        log.info('智能前端浏览器已关闭并清理进程')
 
     dau_map = _smart_parse_all_rows(file_path)
 
@@ -832,6 +864,11 @@ class InternalBackfillSpider:
     # ── 浏览器初始化 ──────────────────────────────────────────
 
     def init_browser(self):
+        # 启动前清理旧进程
+        _kill_chrome_on_port(INTERNAL_PORT)
+        _clear_chrome_lock(INTERNAL_PROFILE)
+        time.sleep(3)
+
         from DrissionPage import ChromiumPage, ChromiumOptions
         co = ChromiumOptions()
         co.set_argument('--start-maximized')

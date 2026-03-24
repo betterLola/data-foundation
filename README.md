@@ -399,6 +399,43 @@ pip install pymysql DrissionPage pandas openpyxl
 
 ## 更新日志 (Changelog)
 
+### [2026-03-24] 内网爬虫提取逻辑重构与累计数据自动重算优化
+
+**修复与优化内容：**
+
+1.  **internal_network_spider.py：**
+    * 进程与锁管理：新增了 kill_chrome_on_port 和 clear_chrome_lock 函数，在启动前会自动清理残留的 Chrome 进程和
+      SingletonLock 文件，显著提升了在自动化环境下的启动稳定性。
+    * 数据提取逻辑优化：extract_data 不再死板地抓取第一行，而是会遍历表格行寻找匹配 YESTERDAY
+      日期的行，增强了对系统延迟或数据错位的容错能力。
+    * 脱敏保留：保留了目标文件中已有的账号、路径和数据库配置的脱敏占位符。
+
+      2. **data_backfilling.py：**
+       * 缺失检查强化：get_missing_dates 现在不仅检查 NULL 值，还会针对内网数据检查 reg == 0 或 real == 0的情况，确保异常数据能被触发重抓。
+       * 全量回填支持：同步了完整的 Step 5 (智能前端) 和 Step 6 (内网爬虫) 回填逻辑，支持一次性补抓过去 7
+         天内缺失的所有细分指标。
+       * 静默清理：在回填过程中同样集成了 Chrome 进程清理，避免多轮抓取任务之间的干扰。
+
+
+      3. **main.py：**
+       * 脚本映射更新：将 umeng_dau 的执行脚本从 langchain.py 更新为 UmengAPI.py，确保与当前项目结构一致。
+       * 回填逻辑联动：优化了 main() 函数中的逻辑。如果 Step 1 的回填程序已经处理了某个数据源，它会自动从 Step 2的今日常规任务中剔除，避免重复抓取和数据库竞争。
+       * 汇总逻辑修复：确保回填后的逻辑汇总（累计服务次数、总日活计算）会从最早的缺失日期开始重新连锁计算，保证数据的最终一致性。
+
+---
+
+### [2026-03-23] 浏览器爬虫稳定性深度修复与环境自愈优化
+
+**修复内容：**
+
+**智能前端爬虫 (smart_frontend_dau_spider.py) 导出逻辑重构：**
+
+*   **解决中断**：修复了在导出 Excel 过程中因“页面被刷新”导致的 `TimeoutError`。
+*   **弹性 Iframe 处理**：重构了 `export_excel` 函数，在点击“列表视图”、“30天范围”及“导出按钮”等关键点位前，新增动态探测并重新连接 iframe 的逻辑，有效对抗页面的异步刷新。
+*   **错误阻断**：在导出流程中断时立即抛出异常，配合 `main.py` 的重试机制，避免脚本在无文件生成的情况下盲目等待。
+
+---
+
 ### [2026-03-18] 跨项目同步与核心逻辑增强
 
 **同步与优化内容：**
@@ -520,7 +557,7 @@ pip install pymysql DrissionPage pandas openpyxl
 
 ```bash
 # 使用虚拟环境运行
-C:\Users\TAOYUAN\PycharmProjects\pythonProject2\venv311\Scripts\python.exe fetch_retention.py
+C:\Users\***\PycharmProjects\pythonProject2\venv311\Scripts\python.exe fetch_retention.py
 ```
 
 ------
@@ -565,7 +602,7 @@ C:\Users\TAOYUAN\PycharmProjects\pythonProject2\venv311\Scripts\python.exe fetch
 | 1    | 脚本杀掉用户自己的 Chrome 窗口                      | 旧代码 `taskkill /IM chrome.exe` 杀全部 Chrome | 改为 `kill_chrome_on_port(9335)`，只杀占用专用端口的进程 |
 | 2    | 下载被中断，永远超时                               | `wait_for_download()` 在 `page.quit()` **之后**调用，Chrome 关闭后下载中断 | 将 `wait_for_download()` 移入 `try` 块，在 `finally: page.quit()` 之前执行 |
 | 3    | 导出确认弹窗点不到，下载不触发                          | 弹窗（"是否导出当前表格Excel文件?"）在 **iframe 内**渲染；`text()="确定"` 精确匹配因按钮 span 含换行符而失败 | ① `_dismiss_popups` 改用 `normalize-space()` 容忍空白；② `export_excel` 先用 `page.get_frame('tag:iframe')` 显式在 iframe 内查找并点击"确定"，失败再回退到页面级搜索 |
-| 4    | 下载文件落到 Chrome 默认目录，`wait_for_download` 找不到 | incognito 模式下 DrissionPage 内部 rename 异常，文件保存到 `C:\Users\TAOYUAN\Downloads\` 而非子目录 | 新增 `DOWNLOAD_ROOT` 常量，`wait_for_download` 同时搜索两个目录；找到后若在其他目录则自动 copy 到 `DOWNLOAD_DIR` |
+| 4    | 下载文件落到 Chrome 默认目录，`wait_for_download` 找不到 | incognito 模式下 DrissionPage 内部 rename 异常，文件保存到 `C:\Users\***\Downloads\` 而非子目录 | 新增 `DOWNLOAD_ROOT` 常量，`wait_for_download` 同时搜索两个目录；找到后若在其他目录则自动 copy 到 `DOWNLOAD_DIR` |
 | 5    | UV 数据始终"暂无数据"（空 Excel）                   | 旧代码 `page.run_js('window.localStorage.clear(); window.sessionStorage.clear()')` 清除了 iframe（frontend-front）的认证 token（同源共享 localStorage） | 移除 localStorage/sessionStorage 清除操作      |
 | 6    | Chrome 弹「想要访问本地网络中的其他设备」原生弹窗             | 脚本首次使用新 Chrome Profile，`local_network` 权限未预授权 | 新增 `ensure_chrome_permissions()`，在 Chrome 启动前向 `CHROME_PROFILE/Default/Preferences` 写入 `local_network` + `loopback_network` 权限（setting=1），免手动点击 |
 | 7    | Chrome 调试 Profile 目录为空，权限无法持久化           | 旧代码用 `set_argument('--user-data-dir=...')` 被 DrissionPage 内部的 `auto_port()` 覆盖 | 改用 `co.set_local_port(9335)` + `co.set_user_data_path(CHROME_PROFILE)`，二者互斥，不再冲突 |
@@ -573,9 +610,9 @@ C:\Users\TAOYUAN\PycharmProjects\pythonProject2\venv311\Scripts\python.exe fetch
 **新增常量**
 
 ```python
-DOWNLOAD_ROOT = r'C:\Users\TAOYUAN\Downloads'   # Chrome 默认下载目录（备用搜索路径）
+DOWNLOAD_ROOT = r'C:\Users\***\Downloads'   # Chrome 默认下载目录（备用搜索路径）
 CHROME_PORT    = 9335   # 专用调试端口，只清理此端口上的旧 Chrome
-CHROME_PROFILE = r'C:\Users\TAOYUAN\AppData\Local\smart_spider_chrome'  # 专用 Profile
+CHROME_PROFILE = r'C:\Users\***\AppData\Local\smart_spider_chrome'  # 专用 Profile
 ```
 
 **新增函数**
