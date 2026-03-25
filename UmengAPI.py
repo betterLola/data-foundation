@@ -11,6 +11,7 @@ import aop
 import aop.api
 import json
 import sys
+import logging
 from datetime import datetime, timedelta
 import urllib.parse
 
@@ -19,25 +20,55 @@ if sys.platform == 'win32':
     import io
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
-# ====================== 1. 友盟API配置 ======================
-# 友盟开放平台 API 认证信息，登录 https://developer.umeng.com/ 获取
-API_KEY = "更换为友盟API_KEY"        # 友盟开放平台 API Key
-API_SECURITY = "更换为友盟API_SECRET"  # 友盟开放平台 API Secret
+# ── 统一配置加载 ─────────────────────────────────────────────
+try:
+    from config import (
+        DB_CONFIG,
+        UMENG_API_KEY      as API_KEY,
+        UMENG_API_SECRET   as API_SECURITY,
+        UMENG_APP_APPKEYS  as PLATFORM_APPKEYS,
+        UMENG_MINI_APPKEYS as MINI_PROGRAM_APPKEYS,
+    )
+except ImportError:
+    # 友盟开放平台 API 认证信息
+    API_KEY = "更换为友盟API_KEY"
+    API_SECURITY = "更换为友盟API_SECRET"
+    PLATFORM_APPKEYS = {
+        "安卓": "更换为安卓端AppKey",
+        "苹果": "更换为苹果端AppKey",
+        "鸿蒙": "更换为鸿蒙端AppKey",
+    }
+    MINI_PROGRAM_APPKEYS = {
+        "微信小程序": "更换为微信小程序DataSourceId",
+        "支付宝小程序": "更换为支付宝小程序DataSourceId",
+    }
+    DB_CONFIG = {
+        'host': 'localhost',
+        'port': 3306,
+        'user': 'root',
+        'password': '更换为自己的MySQL密码',
+        'database': 'daily',
+        'charset': 'utf8mb4'
+    }
 
-# 原生APP各端的 AppKey（在友盟控制台应用列表中查看）
-PLATFORM_APPKEYS = {
-    "安卓": "更换为安卓端AppKey",
-    "苹果": "更换为苹果端AppKey",
-    "鸿蒙": "更换为鸿蒙端AppKey",
-}
+# ── 日志 ─────────────────────────────────────────────────────
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
 
-# 小程序的 DataSourceId（在友盟控制台小程序应用中查看）
-MINI_PROGRAM_APPKEYS = {
-    "微信小程序": "更换为微信小程序DataSourceId",
-    "支付宝小程序": "更换为支付宝小程序DataSourceId",
-}
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(
+            os.path.join(LOG_DIR, f"umeng_api_{datetime.now().strftime('%Y%m%d')}.log"),
+            encoding="utf-8"
+        ),
+        logging.StreamHandler(sys.stdout),
+    ]
+)
+log = logging.getLogger(__name__)
 
-# 昨日日期（用于获取昨日日活）
+# 昨日日期
 YESTERDAY = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
@@ -49,20 +80,13 @@ def decode_url_encoded_str(encoded_str):
     try:
         return urllib.parse.unquote(encoded_str, encoding="utf-8")
     except Exception as e:
-        print(f"解码失败：{e}，返回原字符串")
+        log.warning(f"解码失败：{e}，返回原字符串")
         return encoded_str
 
 
 # ====================== 3. 核心功能：获取单个平台日活 ======================
 def get_platform_dau(platform_name, appkey, date):
-    """
-    获取指定平台指定日期的日活数据（原生APP）
-
-    :param platform_name: 平台名称（安卓/苹果/鸿蒙）
-    :param appkey: 应用appkey
-    :param date: 查询日期（格式：YYYY-MM-DD）
-    :return: 日活数值，失败返回None
-    """
+    """获取指定平台指定日期的日活数据（原生APP）"""
     try:
         aop.set_default_server('gateway.open.umeng.com')
         aop.set_default_appinfo(API_KEY, API_SECURITY)
@@ -77,46 +101,31 @@ def get_platform_dau(platform_name, appkey, date):
         )
 
         if resp.get("success") is False:
-            print(f"【{platform_name}】接口调用失败：{resp.get('errorMsg')}（错误码：{resp.get('errorCode')}）")
+            log.error(f"【{platform_name}】接口调用失败：{resp.get('errorMsg')}（错误码：{resp.get('errorCode')}）")
             return None
 
         active_user_info = resp.get("activeUserInfo", [])
 
         if not active_user_info:
-            print(f"【{platform_name}】{date} 无数据")
+            log.info(f"【{platform_name}】{date} 无数据")
             return 0
 
         for info in active_user_info:
             if info.get("date") == date:
                 dau = info.get("value", 0)
-                print(f"✅ 【{platform_name}】{date} 日活：{dau:,}")
+                log.info(f"✅ 【{platform_name}】{date} 日活：{dau:,}")
                 return dau
 
-        print(f"【{platform_name}】未找到{date}的数据")
+        log.info(f"【{platform_name}】未找到{date}的数据")
         return 0
 
-    except aop.ApiError as e:
-        print(f"【{platform_name}】API网关异常：{e}")
-        return None
-    except aop.AopError as e:
-        print(f"【{platform_name}】客户端异常：{e}")
-        return None
     except Exception as e:
-        print(f"【{platform_name}】未知异常：{e}")
-        import traceback
-        traceback.print_exc()
+        log.error(f"【{platform_name}】异常：{e}")
         return None
 
 
 def get_mini_program_dau(program_name, appkey, date):
-    """
-    获取指定小程序指定日期的日活数据
-
-    :param program_name: 小程序名称（微信小程序/支付宝小程序）
-    :param appkey: 数据源ID（dataSourceId）
-    :param date: 查询日期（格式：YYYY-MM-DD）
-    :return: 日活数值，失败返回None
-    """
+    """获取指定小程序指定日期的日活数据"""
     try:
         aop.set_default_server('gateway.open.umeng.com')
         aop.set_default_appinfo(API_KEY, API_SECURITY)
@@ -132,61 +141,45 @@ def get_mini_program_dau(program_name, appkey, date):
         )
 
         if not resp.get("success"):
-            print(f"【{program_name}】接口调用失败：{resp.get('msg')}")
+            log.error(f"【{program_name}】接口调用失败：{resp.get('msg')}")
             return None
 
         data_list = resp.get("data", {}).get("data", [])
 
         if not data_list:
-            print(f"【{program_name}】{date} 无数据")
+            log.info(f"【{program_name}】{date} 无数据")
             return 0
 
         for item in data_list:
             if item.get("dateTime") == date:
                 dau = item.get("activeUser", 0)
-                print(f"✅ 【{program_name}】{date} 日活：{dau:,}")
+                log.info(f"✅ 【{program_name}】{date} 日活：{dau:,}")
                 return dau
 
-        print(f"【{program_name}】未找到{date}的数据")
+        log.info(f"【{program_name}】未找到{date}的数据")
         return 0
 
-    except aop.ApiError as e:
-        print(f"【{program_name}】API网关异常：{e}")
-        return None
-    except aop.AopError as e:
-        print(f"【{program_name}】客户端异常：{e}")
-        return None
     except Exception as e:
-        print(f"【{program_name}】未知异常：{e}")
-        import traceback
-        traceback.print_exc()
+        log.error(f"【{program_name}】异常：{e}")
         return None
 
 
 # ====================== 4. 获取所有平台日活数据 ======================
 def get_all_platforms_dau(date=None):
-    """
-    获取所有平台的日活数据：安卓、苹果、鸿蒙APP + 微信小程序、支付宝小程序
-
-    :param date: 查询日期，默认为昨日
-    :return: 包含所有平台日活的字典
-    """
+    """获取所有平台的日活数据"""
     if date is None:
         date = YESTERDAY
 
-    print("=" * 60)
-    print(f"全平台日活数据获取")
-    print(f"查询日期：{date}")
-    print("=" * 60)
+    log.info("=" * 60)
+    log.info(f"全平台日活数据获取 | 查询日期：{date}")
+    log.info("=" * 60)
 
     results = {}
 
-    print("\n【原生APP平台】")
     for platform_name, appkey in PLATFORM_APPKEYS.items():
         dau = get_platform_dau(platform_name, appkey, date)
         results[platform_name] = dau
 
-    print("\n【小程序平台】")
     for program_name, appkey in MINI_PROGRAM_APPKEYS.items():
         dau = get_mini_program_dau(program_name, appkey, date)
         results[program_name] = dau
@@ -210,64 +203,16 @@ def get_all_platforms_dau(date=None):
         "query_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
 
-    print("\n" + "=" * 60)
-    print("【汇总结果】")
-    print("=" * 60)
-
-    print("\nAPP平台：")
-    for platform_name in ["安卓", "苹果", "鸿蒙"]:
-        dau = results.get(platform_name)
-        if dau is not None:
-            print(f"  ✅ {platform_name}APP日活: {dau:,}")
-        else:
-            print(f"  ❌ {platform_name}APP日活: 获取失败")
-
-    if app_total_dau > 0:
-        print(f"  📊 APP总日活: {app_total_dau:,}")
-
-    print("\n小程序平台：")
-    for program_name in ["微信小程序", "支付宝小程序"]:
-        dau = results.get(program_name)
-        if dau is not None:
-            print(f"  ✅ {program_name}日活: {dau:,}")
-        else:
-            print(f"  ❌ {program_name}日活: 获取失败")
-
-    if platform_total_dau > 0:
-        print(f"\n🎯 全平台总日活: {platform_total_dau:,}")
-
     return result
 
 
-# ====================== 5. 数据入库功能（MySQL） ======================
-# MySQL数据库配置，请根据实际环境修改
-DB_CONFIG = {
-    'host': 'localhost',           # 数据库地址
-    'port': 3306,                  # 数据库端口，默认 3306
-    'user': 'root',                # 数据库用户名
-    'password': '更换为自己的MySQL密码',
-    'database': 'daily',
-    'charset': 'utf8mb4'
-}
-
+# ====================== 5. 数据入库功能 ======================
 def save_to_database(data):
-    """
-    将日活数据入库到MySQL数据库
-    采用安全策略：只更新友盟相关字段，不影响其他字段（如爬虫数据）
-
-    :param data: 包含日活数据的字典
-    """
+    """将日活数据入库到MySQL数据库"""
     try:
         import pymysql
 
-        conn = pymysql.connect(
-            host=DB_CONFIG['host'],
-            port=DB_CONFIG['port'],
-            user=DB_CONFIG['user'],
-            password=DB_CONFIG['password'],
-            database=DB_CONFIG['database'],
-            charset=DB_CONFIG['charset']
-        )
+        conn = pymysql.connect(**DB_CONFIG)
         cursor = conn.cursor()
 
         query_date = data.get("date")
@@ -297,7 +242,7 @@ def save_to_database(data):
             """
             cursor.execute(sql, (android_dau, ios_dau, harmonyos_dau, app_dau,
                                 mini_program_dau, alipay_dau, query_date))
-            print(f"   更新已存在记录的友盟字段: {query_date}")
+            log.info(f"   更新记录: {query_date}")
         else:
             sql = """
                 INSERT INTO platform_daily_metrics
@@ -308,54 +253,25 @@ def save_to_database(data):
             """
             cursor.execute(sql, (query_date, android_dau, ios_dau, harmonyos_dau,
                                 app_dau, mini_program_dau, alipay_dau))
-            print(f"   新增记录: {query_date}")
+            log.info(f"   新增记录: {query_date}")
 
         conn.commit()
-
-        print(f"\n✅ 数据成功入库到MySQL")
-        print(f"   数据库：{DB_CONFIG['database']}")
-        print(f"   表名：platform_daily_metrics")
-        print(f"   日期：{query_date}")
-        print(f"   安卓日活：{android_dau:,}")
-        print(f"   苹果日活：{ios_dau:,}")
-        print(f"   鸿蒙日活：{harmonyos_dau:,}")
-        print(f"   APP总日活：{app_dau:,}")
-        print(f"   微信小程序日活：{mini_program_dau:,}")
-        print(f"   支付宝小程序日活：{alipay_dau:,}")
-        print(f"   ℹ️  注意：爬虫字段（new_register_users等）未被修改")
-
+        log.info(f"✅ 数据成功入库到MySQL")
         cursor.close()
         conn.close()
 
-    except ImportError:
-        print(f"\n❌ 缺少 pymysql 模块，请安装：pip install pymysql")
-        import traceback
-        traceback.print_exc()
     except Exception as e:
-        print(f"\n❌ 入库失败：{e}")
-        import traceback
-        traceback.print_exc()
+        log.error(f"❌ 入库失败：{e}")
 
 
 # ====================== 6. 主函数 ======================
 def main():
-    """主函数：获取全平台昨日日活（APP+小程序）→ 结构化输出 → 入库MySQL"""
     try:
         result = get_all_platforms_dau()
-
-        print("\n" + "=" * 60)
-        print("【JSON格式输出】")
-        print("=" * 60)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-
         save_to_database(result)
-
         return result
-
     except Exception as e:
-        print(f"\n❌ 程序执行失败：{e}")
-        import traceback
-        traceback.print_exc()
+        log.error(f"❌ 程序执行失败：{e}")
         return None
 
 

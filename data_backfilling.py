@@ -123,30 +123,69 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+def _kill_chrome_by_profile(profile_path: str):
+    """根据 profile 路径杀死对应的 Chrome 进程"""
+    import subprocess
+    import time
+    ps_cmd = (
+        f'Get-CimInstance Win32_Process -Filter "name = \'chrome.exe\'" | '
+        f'Where-Object {{ $_.CommandLine -like "*{profile_path}*" }} | '
+        f'ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}'
+    )
+    try:
+        subprocess.run(['powershell', '-Command', ps_cmd], capture_output=True, timeout=10)
+        time.sleep(2)
+    except Exception:
+        pass
+
+
 def _kill_chrome_on_port(port: int) -> None:
-    """强制关闭占用指定调试端口的 Chrome 进程"""
+    """杀死占用调试端口的 Chrome 进程"""
     import subprocess
     try:
-        # Windows 下使用 netstat 查找 PID 并 taskkill
         res = subprocess.run(['netstat', '-ano'], capture_output=True, text=True)
         for line in res.stdout.splitlines():
             if f':{port} ' in line and 'LISTENING' in line:
                 pid = line.strip().split()[-1]
                 if pid.isdigit():
                     subprocess.run(['taskkill', '/F', '/PID', pid], capture_output=True)
-                    log.info(f"已强制关闭占用端口 {port} 的进程 PID: {pid}")
+                    log.info(f"已清理占用端口 {port} 的进程 PID: {pid}")
     except Exception:
         pass
 
+
 def _clear_chrome_lock(profile_path: str):
-    """清理 Chrome 锁文件"""
-    lock_file = os.path.join(profile_path, 'SingletonLock')
-    if os.path.exists(lock_file):
-        try:
-            os.remove(lock_file)
-            log.info(f"已清理浏览器锁文件: {lock_file}")
-        except Exception:
-            pass
+    """清理 Chrome 锁文件及异常退出状态"""
+    # 1. 杀死相关进程
+    _kill_chrome_by_profile(profile_path)
+
+    # 2. 清理锁文件
+    for lock_name in ['SingletonLock', 'SingletonCookie', 'lockfile']:
+        lock_file = os.path.join(profile_path, lock_name)
+        if os.path.exists(lock_file):
+            try:
+                os.remove(lock_file)
+                log.info(f"清理锁文件: {lock_name}")
+            except Exception:
+                pass
+
+    # 3. 修复崩溃状态
+    for crash_file in [
+        os.path.join(profile_path, 'Local State'),
+        os.path.join(profile_path, 'Default', 'Preferences'),
+    ]:
+        if os.path.exists(crash_file):
+            try:
+                with open(crash_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+                if '"exit_type":"Crashed"' in content or '"exited_cleanly":false' in content:
+                    content = content.replace('"exit_type":"Crashed"', '"exit_type":"Normal"')
+                    content = content.replace('"exited_cleanly":false', '"exited_cleanly":true')
+                    with open(crash_file, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                    log.info(f'已修复异常退出状态: {os.path.basename(crash_file)}')
+            except Exception:
+                pass
 
 # ════════════════════════════════════════════════════════════
 # Step 1 — 缺失检查
@@ -155,15 +194,6 @@ def _clear_chrome_lock(profile_path: str):
 def get_missing_dates() -> dict:
     """
     检查近 7 天（不含今日）各数据源的缺失情况。
-
-    返回:
-        {
-          'umeng_dau':       [dates...],   # android/ios/harmony/mini/alipay 任一 NULL
-          'smart_frontend':  [dates...],   # smart_frontend_dau 为 NULL
-          'internal_network':[dates...],   # new_register_users 或 new_realname_users 为 NULL 或 0
-          'resource_total':  [dates...],   # resource_total 表该日期无记录
-          '5100_detail':     [dates...],   # 5100_detail 表该日期无记录
-        }
     """
     today       = datetime.date.today()
     check_dates = [
@@ -192,7 +222,6 @@ def get_missing_dates() -> dict:
             )
             row = cursor.fetchone()
             if row is None:
-                # 整行不存在，三类来源都缺失
                 missing['umeng_dau'].append(d)
                 missing['smart_frontend'].append(d)
                 missing['internal_network'].append(d)
@@ -202,7 +231,6 @@ def get_missing_dates() -> dict:
                     missing['umeng_dau'].append(d)
                 if sf is None:
                     missing['smart_frontend'].append(d)
-                # 如果 reg 或 real 为空，或为 0（排除正常的 0，但通常内网系统此时应有值），标记为缺失需重抓
                 if reg is None or real is None or reg == 0 or real == 0:
                     missing['internal_network'].append(d)
 
@@ -266,7 +294,7 @@ def backfill_umeng_dau(dates: list):
             log.info(f"  处理日期: {d}")
             vals = {}
 
-            # 原生 APP（安卓 / 苹果 / 鸿蒙）
+            # 原生 APP
             for name, appkey in PLATFORM_APPKEYS.items():
                 try:
                     req = aop.api.UmengUappGetActiveUsersRequest()
@@ -287,7 +315,7 @@ def backfill_umeng_dau(dates: list):
                     log.warning(f"    {name} 获取失败: {e}")
                     vals[name] = None
 
-            # 小程序（微信 / 支付宝）
+            # 小程序
             for name, ds_id in MINI_PROGRAM_APPKEYS.items():
                 try:
                     req = aop.api.UmengUminiGetOverviewRequest()
@@ -346,7 +374,7 @@ def backfill_umeng_dau(dates: list):
 # ── 2-B: resource_total ──────────────────────────────────────
 
 def backfill_resource_total(dates: list):
-    """回填 resource_total 表（各端事件数据）"""
+    """回填 resource_total 表"""
     if not dates:
         return
     log.info(f"[resource_total] 回填 {len(dates)} 天: {dates}")
@@ -396,7 +424,7 @@ def backfill_resource_total(dates: list):
 # ── 2-C: 5100_detail ─────────────────────────────────────────
 
 def backfill_5100_detail(dates: list):
-    """回填 5100_detail 表（510100_items 子服务明细）"""
+    """回填 5100_detail 表"""
     if not dates:
         return
     log.info(f"[5100_detail] 回填 {len(dates)} 天: {dates}")
@@ -460,19 +488,6 @@ def _find_chrome_path():
         if os.path.exists(p):
             return p
     return None
-
-
-def _kill_chrome_on_port(port: int):
-    import subprocess
-    try:
-        res = subprocess.run(['netstat', '-ano'], capture_output=True, text=True)
-        for line in res.stdout.splitlines():
-            if f':{port} ' in line and 'LISTENING' in line:
-                pid = line.strip().split()[-1]
-                if pid.isdigit():
-                    subprocess.run(['taskkill', '/F', '/PID', pid], capture_output=True)
-    except Exception:
-        pass
 
 
 def _inject_chrome_permissions(profile_dir: str, site_key: str):
@@ -559,6 +574,7 @@ def _create_smart_page():
         except Exception as e:
             log.warning(f'智能前端浏览器启动失败 ({i+1}/3): {e}')
             _kill_chrome_on_port(SMART_PORT)
+            _kill_chrome_by_profile(SMART_PROFILE)
             time.sleep(5)
             if i == 2:
                 raise e
@@ -743,8 +759,7 @@ def _smart_wait_download(not_before: float = None, timeout: int = 150) -> str:
 
 def _smart_parse_all_rows(file_path: str) -> dict:
     """
-    解析 Excel 报表，返回 {date_str: dau} 字典（包含所有日期行）。
-    date_str 格式为 YYYY-MM-DD。
+    解析 Excel 报表，返回 {date_str: dau} 字典。
     """
     log.info(f'智能前端: 解析 Excel: {file_path}')
     try:
@@ -779,12 +794,10 @@ def _smart_parse_all_rows(file_path: str) -> dict:
     for _, row in df.iterrows():
         date_text = str(row[date_col]).strip()
 
-        # 尝试解析完整日期 YYYY-MM-DD 或 YYYY/MM/DD
         m = re.search(r'(\d{4}[-/]\d{1,2}[-/]\d{1,2})', date_text)
         if m:
             date_str = m.group(1).replace('/', '-')
         else:
-            # 尝试 MM-DD / MM/DD，补全年份
             m = re.search(r'(\d{1,2}[-/]\d{1,2})', date_text)
             if m:
                 raw      = m.group(1).replace('/', '-')
@@ -802,7 +815,7 @@ def _smart_parse_all_rows(file_path: str) -> dict:
 
 
 def backfill_smart_frontend_dau(dates: list):
-    """通过浏览器下载 30 天 Excel，回填指定日期的智能前端日活"""
+    """回填智能前端日活"""
     if not dates:
         return
     log.info(f"[smart_frontend] 回填 {len(dates)} 天: {dates}")
@@ -819,8 +832,12 @@ def backfill_smart_frontend_dau(dates: list):
         file_path = _smart_wait_download(not_before=start_time)
     finally:
         time.sleep(2)
-        page.quit()
+        try:
+            page.quit()
+        except:
+            pass
         _kill_chrome_on_port(SMART_PORT)
+        _kill_chrome_by_profile(SMART_PROFILE)
         time.sleep(8)
         log.info('智能前端浏览器已关闭并清理进程')
 
@@ -853,9 +870,7 @@ def backfill_smart_frontend_dau(dates: list):
 
 class InternalBackfillSpider:
     """
-    内网爬虫回填版：一次会话抓取所有可见日期行数据，
-    支持同时回填多天缺失数据。
-    表格按日期降序排列（最新在最上方），无需滑动，直接逐行提取。
+    内网爬虫回填版
     """
 
     def __init__(self):
@@ -864,7 +879,6 @@ class InternalBackfillSpider:
     # ── 浏览器初始化 ──────────────────────────────────────────
 
     def init_browser(self):
-        # 启动前清理旧进程
         _kill_chrome_on_port(INTERNAL_PORT)
         _clear_chrome_lock(INTERNAL_PROFILE)
         time.sleep(3)
@@ -882,11 +896,17 @@ class InternalBackfillSpider:
             'BlockInsecurePrivateNetworkRequests'
         )
         log.info('内网爬虫: 正在启动浏览器...')
-        self.page = ChromiumPage(addr_or_opts=co)
-        self.page.run_js(
-            'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
-        )
-        self.page.set.timeouts(30)
+        try:
+            self.page = ChromiumPage(addr_or_opts=co)
+            self.page.run_js(
+                'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
+            )
+            self.page.set.timeouts(30)
+        except Exception as e:
+            log.error(f'内网浏览器启动失败: {e}')
+            _kill_chrome_on_port(INTERNAL_PORT)
+            _kill_chrome_by_profile(INTERNAL_PROFILE)
+            raise e
 
     # ── 弹窗处理 ──────────────────────────────────────────────
 
@@ -916,7 +936,6 @@ class InternalBackfillSpider:
         self.page.get(INTERNAL_URL)
         time.sleep(5)
 
-        # 清除残留登录
         try:
             logout_btn = self.page.ele(
                 'xpath://span[contains(text(), "退出")]', timeout=5
@@ -965,14 +984,6 @@ class InternalBackfillSpider:
     # ── 提取所有行数据 ────────────────────────────────────────
 
     def extract_all_rows(self) -> dict:
-        """
-        提取表格所有可见行，返回 {date_str: (reg_val, real_val)}。
-        定位 is-scrolling-none 主表体，按列 class 名提取：
-          el-table_1_column_6  = 新增注册用户
-          el-table_1_column_14 = 新增实名用户
-        第1行=昨日，第2行=前天，依此类推；
-        优先读取日期列（el-table_1_column_2）校验，读取失败则按位置推算。
-        """
         log.info('内网爬虫: 正在等待 iframe 加载...')
         time.sleep(10)
 
@@ -982,7 +993,6 @@ class InternalBackfillSpider:
         target.wait.ele_displayed('css:.el-table__body-wrapper', timeout=20)
         target.wait.ele_displayed('css:.el-table__row',    timeout=20)
 
-        # 定位 is-scrolling-none 主表体（避免固定列重影）
         tbody_wrapper = target.ele('css:.el-table__body-wrapper.is-scrolling-none', timeout=10)
         if not tbody_wrapper:
             tbody_wrapper = target
@@ -992,12 +1002,10 @@ class InternalBackfillSpider:
         result = {}
 
         for idx, row in enumerate(rows):
-            # 按位置推算该行对应日期（row 0 = 昨天）
             inferred_date = (
                 datetime.date.today() - datetime.timedelta(days=idx + 1)
             ).strftime('%Y-%m-%d')
 
-            # 尝试从日期列（column_2）读取并验证
             row_date = inferred_date
             try:
                 date_cell = row.ele('css:.el-table_1_column_2 .cell', timeout=2)
@@ -1014,7 +1022,6 @@ class InternalBackfillSpider:
             except Exception:
                 log.info(f'  第{idx+1}行: 未能读取日期列，按位置推算={row_date}')
 
-            # 提取新增实名（column_6）和新增注册（column_14）
             try:
                 real_cell = row.ele('css:.el-table_1_column_6 .cell', timeout=2)
                 reg_cell  = row.ele('css:.el-table_1_column_14 .cell', timeout=2)
@@ -1062,7 +1069,7 @@ class InternalBackfillSpider:
         finally:
             conn.close()
 
-    # ── 带重试的入口 ──────────────────────────────────────────
+    # ── 入口 ──────────────────────────────────────────────────
 
     def run(self, dates: list):
         _inject_chrome_permissions(
@@ -1079,6 +1086,8 @@ class InternalBackfillSpider:
             except Exception as e:
                 log.error(f'内网爬虫第 {i+1} 次失败: {e}')
                 traceback.print_exc()
+                _kill_chrome_on_port(INTERNAL_PORT)
+                _kill_chrome_by_profile(INTERNAL_PROFILE)
                 if i == 2:
                     raise
                 time.sleep(10)
@@ -1122,7 +1131,7 @@ def main():
             log.info(f'  {source:20s}: {dates}')
 
     # ── Step 2: 友盟平台日活 ─────────────────────────────────
-    log.info('\n【Step 2】回填友盟平台日活（安卓/苹果/鸿蒙/微信/支付宝）...')
+    log.info('\n【Step 2】回填友盟平台日活...')
     try:
         backfill_umeng_dau(missing['umeng_dau'])
     except Exception as e:
@@ -1138,7 +1147,7 @@ def main():
         traceback.print_exc()
 
     # ── Step 4: 5100_detail ──────────────────────────────────
-    log.info('\n【Step 4】回填 5100_detail（510100_items 子服务明细）...')
+    log.info('\n【Step 4】回填 5100_detail...')
     try:
         backfill_5100_detail(missing['5100_detail'])
     except Exception as e:
@@ -1161,7 +1170,6 @@ def main():
         log.error(f'内网爬虫回填失败: {e}')
         traceback.print_exc()
 
-    # ── 完成汇报 ─────────────────────────────────────────────
     log.info('\n' + '=' * 65)
     log.info('数据回填任务完成')
     log.info('=' * 65)

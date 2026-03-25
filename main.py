@@ -457,9 +457,9 @@ def main():
             
         print(f"🔍 发现 {source} 缺失数据: {dates}")
         # 更新最早的回填日期，用于后续的连锁加总计算
-        min_date = min(dates)
-        if min_date < earliest_recalc_date:
-            earliest_recalc_date = min_date
+        min_date_str = min(dates)
+        if min_date_str < earliest_recalc_date:
+            earliest_recalc_date = min_date_str
             
         # 只要 dates 不为空，我们就认为 Step 1 会处理这个 source (无论是通过回填还是交给 Step 2)
         # 如果包含昨天且只有昨天，我们跳过回填调用，让它留在 script_mapping 里由 Step 2 执行

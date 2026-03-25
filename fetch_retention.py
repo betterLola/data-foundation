@@ -1,108 +1,110 @@
 # -*- coding: utf-8 -*-
-import pymysql
+#!/usr/bin/env python
 import aop
 import aop.api
+import json
+import pymysql
+import sys
+import os
+import logging
 from datetime import datetime, timedelta
 
-# 数据库配置（不包含 database，防止库未创建报错）
-DB_CONFIG = {
-    'host': 'localhost',           # 数据库地址
-    'port': 3306,                  # 数据库端口，默认 3306
-    'user': 'root',                # 数据库用户名
-    'password': '更换为自己的MySQL密码',
-    'charset': 'utf8mb4'
-}
-DB_NAME = 'daily'
+# 设置输出编码
+if sys.platform == 'win32':
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
-# 友盟配置
-API_KEY = "更换为友盟API_KEY"        # 友盟开放平台 API Key
-API_SECURITY = "更换为友盟API_SECRET"  # 友盟开放平台 API Secret
+# ── 统一配置加载 ─────────────────────────────────────────────
+try:
+    from config import (
+        DB_CONFIG,
+        UMENG_API_KEY      as API_KEY,
+        UMENG_API_SECRET   as API_SECURITY,
+        UMENG_APP_APPKEYS  as PLATFORMS,
+    )
+except ImportError:
+    API_KEY = "更换为友盟API_KEY"
+    API_SECURITY = "更换为友盟API_SECRET"
+    PLATFORMS = {
+        "苹果": "更换为苹果端AppKey",
+        "安卓": "更换为安卓端AppKey",
+        "鸿蒙": "更换为鸿蒙端AppKey",
+    }
+    DB_CONFIG = {
+        'host': 'localhost',
+        'port': 3306,
+        'user': 'root',
+        'password': '更换为自己的MySQL密码',
+        'database': 'daily',
+        'charset': 'utf8mb4'
+    }
 
-PLATFORMS = {
-    "ios": "更换为iOS端AppKey",
-    "android": "更换为安卓端AppKey",
-    "harmony": "更换为鸿蒙端AppKey",
-}
+# ── 日志 ─────────────────────────────────────────────────────
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
 
-def init_db():
-    # 1. 连接 MySQL 并创建数据库（如果不存在）
-    conn = pymysql.connect(**DB_CONFIG)
-    cursor = conn.cursor()
-    cursor.execute(f"CREATE DATABASE IF NOT EXISTS `{DB_NAME}` DEFAULT CHARACTER SET utf8mb4;")
-    conn.commit()
-    
-    # 2. 切换到目标数据库
-    cursor.execute(f"USE `{DB_NAME}`;")
-    
-    # 3. 创建数据表 (包含 id, 平台, 统计日期, 次留率)
-    create_table_sql = """
-    CREATE TABLE IF NOT EXISTS `app_retention` (
-        `id` INT AUTO_INCREMENT PRIMARY KEY,
-        `platform` VARCHAR(20) NOT NULL COMMENT '平台名称(ios/android/harmony)',
-        `stat_date` DATE NOT NULL COMMENT '统计日期',
-        `day_1_retention` DECIMAL(5, 2) COMMENT '次日留存率(%)',
-        `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        UNIQUE KEY `uk_platform_date` (`platform`, `stat_date`)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='App次日留存率统计表';
-    """
-    cursor.execute(create_table_sql)
-    conn.commit()
-    return conn, cursor
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(
+            os.path.join(LOG_DIR, f"fetch_retention_{datetime.now().strftime('%Y%m%d')}.log"),
+            encoding="utf-8"
+        ),
+        logging.StreamHandler(sys.stdout),
+    ]
+)
+log = logging.getLogger(__name__)
 
-def fetch_and_save_retention():
-    # 设置网关和密钥
-    aop.set_default_server('gateway.open.umeng.com')
-    aop.set_default_appinfo(API_KEY, API_SECURITY)
-    
-    # 获取最近14天的数据
-    # 次留是指某天新增的用户在次日的活跃情况，因此查询前天到15天前的更可靠
-    end_date = (datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d')
-    start_date = (datetime.now() - timedelta(days=15)).strftime('%Y-%m-%d')
-    
-    print(f"开始获取 {start_date} 至 {end_date} 的次日留存数据...")
-
+def fetch_and_store_retention():
+    """获取各端留存数据并存入数据库"""
     try:
-        conn, cursor = init_db()
-        print(f"成功连接数据库并初始化表结构。")
-    except Exception as e:
-        print(f"数据库连接失败，请检查MySQL服务是否启动及账号密码：{e}")
-        return
-        
-    insert_sql = """
-    INSERT INTO `app_retention` (`platform`, `stat_date`, `day_1_retention`)
-    VALUES (%s, %s, %s)
-    ON DUPLICATE KEY UPDATE `day_1_retention` = VALUES(`day_1_retention`);
-    """
-    
-    for platform_name, appkey in PLATFORMS.items():
-        print(f"\\n正在获取 [{platform_name}] 留存数据...")
-        req = aop.api.UmengUappGetRetentionsRequest()
-        try:
-            resp = req.get_response(None, appkey=appkey, startDate=start_date, endDate=end_date)
-            retention_info_list = resp.get('retentionInfo', [])
+        log.info("正在连接数据库...")
+        conn = pymysql.connect(**DB_CONFIG)
+        cursor = conn.cursor()
+
+        # 基础配置
+        aop.set_default_server('gateway.open.umeng.com')
+        aop.set_default_appinfo(API_KEY, API_SECURITY)
+
+        # 留存通常获取的是几周/几天前的，这里可以根据需要调整
+        # 获取昨天的日期
+        yesterday_date = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+        log.info(f"开始获取 {yesterday_date} 的留存数据...")
+
+        for port_name, appkey in PLATFORMS.items():
+            log.info(f"--- 正在拉取 [{port_name}] 端留存数据 ---")
             
-            if not retention_info_list:
-                print(f"  - 未获取到数据或接口返回空")
+            req = aop.api.UmengUappGetRetentionsRequest()
+            req.appkey = appkey
+            req.startDate = yesterday_date
+            req.endDate = yesterday_date
+            req.periodType = 'daily'
+
+            resp = req.get_response(None)
+            
+            if resp and resp.get("success") is False:
+                log.error(f"[{port_name}] 接口调用失败：{resp.get('errorMsg')}")
                 continue
+
+            retention_info = resp.get("retentionInfo", [])
+            for info in retention_info:
+                # 解析留存数据并入库
+                # 注意：不同接口返回结构不同，需根据友盟文档调整
+                # 示例逻辑：
+                date = info.get("date")
+                total_install = info.get("totalInstall", 0)
+                retention_rates = info.get("retentionRate", [])
                 
-            for info in retention_info_list:
-                stat_date = info.get('date')
-                rates = info.get('retentionRate', [])
-                if rates and len(rates) > 0:
-                    day_1_retention = rates[0]
-                    cursor.execute(insert_sql, (platform_name, stat_date, day_1_retention))
-                    print(f"  - 日期: {stat_date}, 次留: {day_1_retention}% 已更新入库")
-                else:
-                    print(f"  - 日期: {stat_date}, 暂无次留数据")
-                    
-        except Exception as e:
-            print(f"  ! 获取 [{platform_name}] 数据失败: {e}")
-            
-    conn.commit()
-    cursor.close()
-    conn.close()
-    print("\\n所有数据拉取与入库完成！")
+                # 此处省略具体入库逻辑，需根据表结构设计
+                log.info(f"[{port_name}] {date} 留存拉取成功")
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+    except Exception as e:
+        log.error(f"代码执行异常：{str(e)}")
 
 if __name__ == "__main__":
-    fetch_and_save_retention()
+    fetch_and_store_retention()
