@@ -77,7 +77,10 @@
 | `smart_frontend_dau_spider.py` | `smart_frontend_dau`                     |
 | `5100_detail.py`               | `5100_detail` 表（事件明细）                    |
 | `fetch_retention.py`           | `app_retention` 表（次日留存率）                 |
-| `resource_total.py`            | `resource_total` 表（关键资源位点击）              |
+| `resource_total.py`            | `resource_total` 表（关键资源位点击汇总）           |
+| `search_detail_import.py`      | `search_detail` 表（搜索关键词明细）               |
+| `resource_detail.py`           | `resource_detail` 表（资源位点击明细）             |
+| `core_detail.py`               | `core_detail` 表（核心功能点击明细）                |
 
 ---
 
@@ -154,10 +157,27 @@ python main.py
 | `fetch_retention.py`           | API  | `main.py` 调用 | 拉取三端次日留存率，写入 `app_retention`              |
 | `import_history_appdau.py`     | 工具   | 手动           | 从 CSV 文件批量导入 5100 事件明细历史数据                     |
 | `import_platform_mau.py`       | 工具   | 手动           | 从 Excel 导入全平台月度核心指标历史数据                     |
+| `search_detail_import.py`      | 工具   | 手动           | 逐日分页拉取搜索关键词明细（search_behavior/search_content），入库 `search_detail` 表，支持历史补录 |
+| `resource_detail.py`           | 工具   | 手动           | 逐日拉取 5 类资源位事件点击明细，入库 `resource_detail` 表，支持历史补录 |
+| `core_detail.py`               | 工具   | 手动           | 逐日拉取核心功能点击明细（core_function_click），支持双参数名回退，入库 `core_detail` 表 |
 
 ---
 
 ## 更新日志 (Changelog)
+
+### [2026-03-27] 新增资源位/核心功能明细脚本，搜索详情支持分页拉取
+
+**新增脚本：**
+
+- **`resource_detail.py`**：逐日拉取 5 类资源位事件（`mid_banner` / `news_click` / `top_banner_click` / `Hometopic_click` / `person_banner_click`）的点击明细，入库 `resource_detail` 表，支持历史补录。
+- **`core_detail.py`**：逐日拉取 `core_function_click` 事件明细，入库 `core_detail` 表；支持 `item_name` / `item-name` 双参数名自动回退，确保新老数据均可拉取。
+
+**功能优化：**
+
+- **`search_detail_import.py`**：新增分页拉取支持（`PAGE_SIZE=1000`），彻底解决搜索关键词超 1000 条时数据截断问题；新增 `count ≤ 5` 低频词过滤，减少噪声数据入库。
+- **`5100_detail.py`**：补充 `CREATE TABLE IF NOT EXISTS` 建表语句，首次部署无需手动建表。
+
+---
 
 ### [2026-03-25] 数据底座核心脚本深度同步与架构优化
 

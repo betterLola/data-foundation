@@ -76,6 +76,18 @@ def fetch_and_store_detail():
         conn = pymysql.connect(**DB_CONFIG)
         cursor = conn.cursor()
 
+        # 确保表存在
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS `5100_detail` (
+                service_amount BIGINT,
+                resource_name  VARCHAR(255),
+                service_name   VARCHAR(255),
+                stat_date      DATE,
+                port           VARCHAR(50)
+            ) DEFAULT CHARSET=utf8mb4
+        """)
+        conn.commit()
+
         # 基础配置
         aop.set_default_server('gateway.open.umeng.com')
         aop.set_default_appinfo(API_KEY, API_SECURITY)

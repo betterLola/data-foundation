@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 #!/usr/bin/env python
 """
-search_detail_import.py
-搜索详情数据导入工具：从友盟 API 获取 search_behavior 事件的 search_content 参数详情并入库。
+资源位明细数据导入脚本
+逐日拉取各资源位事件的参数明细数据，入库到 resource_detail 表。
+- mid_banner / news_click / top_banner_click / Hometopic_click → eventParamName=item_name
+- person_banner_click → eventParamName=title
 """
 import sys
 import os
@@ -53,13 +55,22 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.FileHandler(
-            os.path.join(LOG_DIR, f"search_import_{datetime.now().strftime('%Y%m%d')}.log"),
+            os.path.join(LOG_DIR, f"resource_detail_{datetime.now().strftime('%Y%m%d')}.log"),
             encoding="utf-8"
         ),
         logging.StreamHandler(sys.stdout),
     ]
 )
 log = logging.getLogger(__name__)
+
+# 各资源位事件及其对应的 eventParamName
+EVENTS = {
+    'mid_banner':          'item_name',
+    'news_click':          'item_name',
+    'top_banner_click':    'item_name',
+    'Hometopic_click':     'item_name',
+    'person_banner_click': 'title',
+}
 
 PAGE_SIZE = 1000
 
@@ -101,7 +112,7 @@ def fetch_pages(appkey, target_date, event_name, param_name):
 
 
 def decode_url_encoded_str(encoded_str):
-    """通用URL解码函数"""
+    """通用URL解码函数，处理中文编码"""
     if not isinstance(encoded_str, str):
         return encoded_str
     try:
@@ -111,7 +122,7 @@ def decode_url_encoded_str(encoded_str):
 
 
 def get_date_range(start_date, end_date):
-    """获取日期范围列表"""
+    """生成日期列表"""
     start = datetime.strptime(start_date, "%Y-%m-%d")
     end = datetime.strptime(end_date, "%Y-%m-%d")
     dates = []
@@ -122,8 +133,8 @@ def get_date_range(start_date, end_date):
     return dates
 
 
-def fetch_and_store_search_history(start_date='2026-01-01', end_date=None):
-    """抓取搜索关键词详情并入库"""
+def fetch_and_store_resource_detail(start_date='2026-01-01', end_date=None):
+    """逐日拉取各资源位事件明细数据并入库"""
     if end_date is None:
         end_date = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
 
@@ -132,14 +143,15 @@ def fetch_and_store_search_history(start_date='2026-01-01', end_date=None):
         conn = pymysql.connect(**DB_CONFIG)
         cursor = conn.cursor()
 
-        # 确保表存在
+        # 重建 resource_detail 表（确保字段正确）
+        cursor.execute("DROP TABLE IF EXISTS resource_detail")
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS search_detail (
-                search_amount BIGINT,
-                search_name   VARCHAR(255),
-                stat_date     DATE,
-                port          VARCHAR(50),
-                resource_name VARCHAR(255)
+            CREATE TABLE resource_detail (
+                resource_amount BIGINT,
+                resource_name   VARCHAR(255),
+                item_name       VARCHAR(255),
+                stat_date       DATE,
+                port            VARCHAR(50)
             ) DEFAULT CHARSET=utf8mb4
         """)
         conn.commit()
@@ -148,58 +160,55 @@ def fetch_and_store_search_history(start_date='2026-01-01', end_date=None):
         aop.set_default_appinfo(API_KEY, API_SECURITY)
 
         dates_to_fetch = get_date_range(start_date, end_date)
-        log.info(f"计划抓取 {start_date} 至 {end_date} 的搜索详情数据，共 {len(dates_to_fetch)} 天...")
+        log.info(f"开始获取 {start_date} 到 {end_date} 的资源位明细数据，共 {len(dates_to_fetch)} 天...")
 
         for target_date in dates_to_fetch:
-            log.info(f"--- 日期: {target_date} ---")
+            log.info(f"--- 获取日期: {target_date} ---")
             for port_name, appkey in APPS.items():
-                # 检查是否已存在
-                check_sql = """
-                    SELECT COUNT(*) FROM search_detail
-                    WHERE stat_date = %s AND port = %s AND resource_name = 'search_behavior'
-                """
-                cursor.execute(check_sql, (target_date, port_name))
-                if cursor.fetchone()[0] > 0:
-                    log.info(f"  [{port_name}] 已存在数据，跳过")
-                    continue
+                for event_name, param_name in EVENTS.items():
 
-                try:
-                    all_items, page_count = fetch_pages(
-                        appkey, target_date, 'search_behavior', 'search_content'
-                    )
+                    # 检查该日期+端+事件是否已有数据，避免重复入库
+                    cursor.execute("""
+                        SELECT COUNT(*) FROM resource_detail
+                        WHERE stat_date = %s AND port = %s AND resource_name = %s
+                    """, (target_date, port_name, event_name))
+                    existing = cursor.fetchone()[0]
+                    if existing > 0:
+                        log.info(f"  [{port_name}] {event_name} {target_date} 已有 {existing} 条数据，跳过。")
+                        continue
+
+                    all_items, page_count = fetch_pages(appkey, target_date, event_name, param_name)
 
                     if not all_items:
-                        log.info(f"  [{port_name}] 无数据")
+                        log.info(f"  [{port_name}] {event_name} 暂无数据。")
                         continue
 
                     inserted = 0
                     for item in all_items:
-                        raw_name  = item.get("name", "")
-                        count_val = item.get("count", 0)
-                        if count_val <= 5:
-                            continue
-                        decoded = decode_url_encoded_str(raw_name)
+                        raw_name   = item.get("name", "")
+                        count_val  = item.get("count", 0)
+                        decoded_name = decode_url_encoded_str(raw_name)
 
                         cursor.execute("""
-                            INSERT INTO search_detail (search_amount, search_name, stat_date, port, resource_name)
+                            INSERT INTO resource_detail
+                                (resource_amount, resource_name, item_name, stat_date, port)
                             VALUES (%s, %s, %s, %s, %s)
-                        """, (count_val, decoded, target_date, port_name, 'search_behavior'))
+                        """, (count_val, event_name, decoded_name, target_date, port_name))
                         inserted += 1
 
-                    log.info(f"  [{port_name}] 共 {page_count} 页，成功导入 {inserted} 条关键词详情（已过滤 count≤5）")
+                    log.info(f"  [{port_name}] {event_name} 共 {page_count} 页，入库 {inserted} 条明细数据。")
 
-                except Exception as e:
-                    log.error(f"  [{port_name}] 异常: {e}")
-
+            # 每天提交一次，减少锁等待
             conn.commit()
 
         cursor.close()
         conn.close()
-        log.info("搜索详情抓取任务完成。")
+        log.info("所有资源位明细数据已成功入库。")
 
     except Exception as e:
-        log.error(f"执行异常：{str(e)}")
+        log.error(f"代码执行异常：{str(e)}")
         traceback.print_exc()
 
+
 if __name__ == "__main__":
-    fetch_and_store_search_history()
+    fetch_and_store_resource_detail()
